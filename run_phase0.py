@@ -26,6 +26,18 @@ import sys
 import time
 from pathlib import Path
 
+# Make `python run_phase0.py` work from inside the package directory.  Python
+# puts only the *script's own* directory on sys.path, so `neurosymbolic_faithfulness.*`
+# would not resolve.  Putting the parent on the path fixes that; running as
+# `python -m neurosymbolic_faithfulness.run_phase0` from the parent also works.
+import sys as _sys
+from pathlib import Path as _Path
+
+_PKG_PARENT = str(_Path(__file__).resolve().parent.parent)
+if _PKG_PARENT not in _sys.path:
+    _sys.path.insert(0, _PKG_PARENT)
+
+
 from neurosymbolic_faithfulness.analyze import analyse, read_jsonl, write_csv
 from neurosymbolic_faithfulness.config import Config
 from neurosymbolic_faithfulness.engine import make_engine

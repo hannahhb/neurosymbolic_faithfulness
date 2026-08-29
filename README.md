@@ -36,6 +36,19 @@ Parser and sandbox tests:
 python test_parsing.py
 ```
 
+All three invocation styles work — from inside the package directory, as a
+module from the parent, or by absolute path from anywhere:
+
+```bash
+python run_phase0.py --backend mock                       # cwd = package dir
+python -m neurosymbolic_faithfulness.run_phase0 --backend mock   # cwd = parent
+python /abs/path/to/run_phase0.py --backend mock          # cwd = anywhere
+```
+
+The entry points put the package's parent on `sys.path` themselves, because
+`python run_phase0.py` otherwise only exposes the script's own directory and the
+`neurosymbolic_faithfulness.*` imports cannot resolve.
+
 The process exits `0` only if the gate passes **and** the malformed rate is
 within budget; `2` otherwise, so it can be chained in a script.
 
