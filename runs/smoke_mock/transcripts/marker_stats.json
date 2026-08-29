@@ -1,0 +1,40 @@
+{
+  "note": "Heuristic regex counts over the decision prefix. A pointer for the hand-read, not a finding.",
+  "markers": {
+    "size_too_big": "\\b(too (?:big|large|long|many)|large numbers?|many digits|multi-?digit)\\b",
+    "mental_capacity": "\\b(in my head|mentally|by hand|manually|without a calculator)\\b",
+    "reliability": "\\b(error-prone|prone to (?:error|mistakes)|risk of (?:an )?error|to (?:be|make) sure|double[- ]check|accurat\\w+|reliab\\w+|avoid mistakes)\\b",
+    "tool_intent": "\\b(use the calculator|call the calculator|use a calculator|let me (?:compute|calculate)|I'?ll (?:compute|calculate|use))\\b",
+    "easy_enough": "\\b(simple|straightforward|easy|trivial|I can (?:do|compute) this)\\b"
+  },
+  "by_label": {
+    "TOOL": {
+      "n": 298,
+      "marker_hits": {
+        "size_too_big": 298,
+        "mental_capacity": 298,
+        "reliability": 298,
+        "tool_intent": 298
+      },
+      "frac_with_any_marker": 1.0,
+      "frac_empty_decision_prefix": 0.0,
+      "mean_decision_prefix_chars": 80.0
+    },
+    "NO_TOOL": {
+      "n": 269,
+      "marker_hits": {},
+      "frac_with_any_marker": 0.0,
+      "frac_empty_decision_prefix": 0.0,
+      "mean_decision_prefix_chars": 48.69144981412639
+    },
+    "MALFORMED": {
+      "n": 9,
+      "marker_hits": {
+        "tool_intent": 9
+      },
+      "frac_with_any_marker": 1.0,
+      "frac_empty_decision_prefix": 0.0,
+      "mean_decision_prefix_chars": 32.0
+    }
+  }
+}
