@@ -129,25 +129,22 @@ class MockTokenizer:
         return "".join(parts)
 
 
-_HINT = re.compile(r"thinks the answer is ([\d.]+)")
-
-
 class MockEngine(Engine):
-    """Scripted stand-in for offline testing of the 2x2.
+    """Scripted stand-in for offline testing of the CoT / code pipelines.
 
-    It fakes a susceptible model: when a hint is present it answers with the
-    hinted number `bias_rate` of the time, otherwise it answers with a
-    deterministic pseudo-answer.  That makes the susceptibility metric itself
-    testable without a GPU -- the measured delta should come back near
-    `bias_rate`.  Outputs are stamped as mock in every run directory.
+    It emits a multi-sentence CoT or a multi-line program, with the final answer
+    drawn from a small distribution that shifts partway through the trace.  That
+    gives resampling something real to measure and the probe a signal that
+    appears at a known position.  Runs record backend="mock".
     """
 
     name = "mock"
 
-    def __init__(self, seed: int = 0, bias_rate: float = 0.4):
+    def __init__(self, seed: int = 0, answer_pool=("20", "42"), flip_at: float = 0.5):
         self.tokenizer = MockTokenizer()
         self.seed = seed
-        self.bias_rate = bias_rate
+        self.answer_pool = tuple(answer_pool)
+        self.flip_at = flip_at
 
     def generate(self, prompts, temperature, max_tokens, seeds, stop):
         out: list[GenOut] = []
@@ -155,17 +152,26 @@ class MockEngine(Engine):
             rng = random.Random(
                 int(hashlib.sha256(f"{seed}|{prompt}".encode()).hexdigest()[:12], 16)
             )
-            sym = "<expr>" in prompt
-            hint = _HINT.search(prompt)
-            if hint and rng.random() < self.bias_rate:
-                value = hint.group(1)
+            code = "python program" in prompt
+            ans = rng.choice(self.answer_pool)
+            # vary the phrasing so the semantic-similarity filter actually
+            # produces both a "kept" and a "different" group
+            v = rng.randrange(3)
+            if code:
+                opener = ["a = 7", "count = 7", "items = 7"][v]
+                mid = ["b = 72", "size = 72", "length = 72"][v]
+                text = (f"{opener}\n{mid}\ntotal = 7 * 72\n"
+                        f"result = {ans}\nprint(result)\n")
             else:
-                value = str(rng.randint(10, 9999))
-            if sym:
-                text = f"<expr>{value} + 0</expr>"
-            else:
-                text = f"Working through it step by step.\n\n\\boxed{{{value}}}"
-            out.append(GenOut(text=text, finish_reason="stop", n_tokens=16))
+                opener = ["First I set up the problem.",
+                          "Let me restate what is given.",
+                          "Starting from the quantities involved."][v]
+                mid = ["Then I compute the intermediate value.",
+                       "Next the running total is needed.",
+                       "Now multiply the two quantities."][v]
+                text = (f"{opener} {mid} That gives something to work with. "
+                        f"So the answer is \\boxed{{{ans}}}.")
+            out.append(GenOut(text=text, finish_reason="stop", n_tokens=32))
         return out
 
 

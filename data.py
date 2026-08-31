@@ -1,121 +1,152 @@
-"""gsm_symbolic items plus the biasing distractor X.
+"""The two problem sources.
 
-X is chosen to be *plausible*: wherever possible it is an intermediate value
-from the problem's own solution -- the number you would land on by stopping a
-step early -- rather than a random wrong number.  gsm_symbolic exposes every
-intermediate in metadata["variables"], and metadata["answer_cot"] shows which
-of them are computed rather than given.
+apple/GSM-Symbolic -- 100 templates x 50 instances.  Both arms are generated
+    ourselves here, and template identity (`original_id`) is the clustering unit,
+    since instances of one template differ only in names and numbers.
 
-Consequence to state in the write-up: intermediate-value hints are more
-seductive than random ones, so absolute susceptibility rates are inflated.  The
-NL/SYM comparison is unaffected because X is identical across conditions.
+uzaymacar/math-rollouts -- the Thought Anchors companion data.  Its
+    chunks_labeled.json ALREADY carries per-chunk resampling_importance_kl,
+    counterfactual_importance_kl, forced_importance_kl, the 8-category
+    function_tags, depends_on and overdeterminedness, for
+    R1-Distill-Qwen-14B and R1-Distill-Llama-8B on MATH.  So the CoT arm on
+    those problems is free: only the code arm has to be generated, and only if
+    the same model is used.
 """
 
 from __future__ import annotations
 
-import math
+import json
 import re
 from dataclasses import dataclass, asdict, field
 from typing import Any
 
-import reasoning_gym
+GSM_CONFIGS = ("main", "p1", "p2")
+MR_REPO = "uzaymacar/math-rollouts"
+MR_MODELS = ("deepseek-r1-distill-qwen-14b", "deepseek-r1-distill-llama-8b")
+MR_TEMP = "temperature_0.6_top_p_0.95"
+MR_SPLITS = ("correct_base_solution", "incorrect_base_solution")
 
-# gsm_symbolic asserts on any difficulty other than 1.0 (verified against the
-# installed package); there is no difficulty knob to sweep here.
-DIFFICULTY = 1.0
+_FINAL = re.compile(r"####\s*([-\d,\.]+)")
 
 
 @dataclass
-class Item:
-    item_id: str
-    source_index: int
-    template_id: int            # which of the 100 generators produced this item
+class Problem:
+    problem_id: str
+    source: str              # "gsm_symbolic" | "math_rollouts"
     question: str
-    answer: str                 # ground truth, as a string
-    answer_value: float
-    distractor: str             # X, the wrong answer injected as a hint
-    distractor_value: float
-    distractor_kind: str        # "intermediate" | "perturbed"
-    variables: dict[str, Any]
-    answer_cot: str
+    answer: str              # ground truth, bare
+    cluster_id: str          # template id (GSM) or problem id (MATH)
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _numeric(v: Any) -> float | None:
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    return None
+def _clean_number(s: str) -> str:
+    return s.strip().replace(",", "").rstrip(".")
 
 
-def _fmt(v: float) -> str:
-    return str(int(v)) if float(v).is_integer() else repr(round(v, 4))
+def load_gsm_symbolic(n: int, seed: int = 0, config: str = "main",
+                      instances_per_template: int = 1) -> list[Problem]:
+    """Sample problems, spreading across templates rather than clustering on a
+    few, since templates are the unit the statistics cluster on."""
+    from datasets import load_dataset
 
+    ds = load_dataset("apple/GSM-Symbolic", config, split="test")
+    by_tpl: dict[int, list[int]] = {}
+    for i, tid in enumerate(ds["original_id"]):
+        by_tpl.setdefault(int(tid), []).append(i)
 
-def _question_numbers(question: str) -> set[float]:
-    return {float(m) for m in re.findall(r"\d+(?:\.\d+)?", question)}
+    import random
+    rng = random.Random(seed)
+    tpls = sorted(by_tpl)
+    rng.shuffle(tpls)
 
+    picked: list[int] = []
+    for t in tpls:
+        rows = by_tpl[t][:]
+        rng.shuffle(rows)
+        picked.extend(rows[:instances_per_template])
+        if len(picked) >= n:
+            break
+    picked = picked[:n]
 
-def choose_distractor(question: str, answer: float, variables: dict,
-                      answer_cot: str) -> tuple[float, str]:
-    """Pick a plausible wrong answer.
-
-    Preference order:
-      1. a *computed* intermediate -- appears in the worked solution but is not
-         one of the numbers handed to the model in the question
-      2. any other intermediate
-      3. a perturbation of the answer (last resort, recorded as such)
-
-    Among candidates, the one closest to the answer in log-magnitude wins: a
-    hint three orders of magnitude off is not a temptation, it is a typo.
-    """
-    given = _question_numbers(question)
-    cands: list[tuple[int, float, float]] = []   # (tier, distance, value)
-    for v in variables.values():
-        x = _numeric(v)
-        if x is None or x == answer or x == 0:
-            continue
-        computed = (_fmt(x) in answer_cot) and (x not in given)
-        dist = abs(math.log10(abs(x) + 1) - math.log10(abs(answer) + 1))
-        cands.append((0 if computed else 1, dist, x))
-    if cands:
-        cands.sort(key=lambda t: (t[0], t[1]))
-        return cands[0][2], "intermediate"
-
-    # nothing usable in the metadata: perturb the answer in a way a model
-    # plausibly might, and mark it so these items can be split out in analysis
-    for factor in (2.0, 0.5, 1.1):
-        x = round(answer * factor)
-        if x != answer and x != 0:
-            return float(x), "perturbed"
-    return float(answer + 1), "perturbed"
-
-
-def build_items(n: int, seed: int) -> tuple[list[Item], Any]:
-    ds = reasoning_gym.create_dataset(
-        "gsm_symbolic", size=n, seed=seed, difficulty=DIFFICULTY
-    )
-    items: list[Item] = []
-    for i in range(n):
-        e = ds[i]
-        m = e["metadata"]
-        ans = float(m["answer_value"])
-        x, kind = choose_distractor(e["question"], ans, m.get("variables", {}),
-                                    m.get("answer_cot", ""))
-        items.append(Item(
-            item_id=f"gsm:{seed}:{i:05d}",
-            source_index=i,
-            template_id=int(ds.task_indices[i]),
-            question=e["question"],
-            answer=str(e["answer"]),
-            answer_value=ans,
-            distractor=_fmt(x),
-            distractor_value=x,
-            distractor_kind=kind,
-            variables=m.get("variables", {}),
-            answer_cot=m.get("answer_cot", ""),
+    out = []
+    for i in picked:
+        r = ds[i]
+        m = _FINAL.search(r["answer"])
+        out.append(Problem(
+            problem_id=f"gsm:{config}:{r['id']}:{r['instance']}",
+            source="gsm_symbolic",
+            question=r["question"],
+            answer=_clean_number(m.group(1)) if m else "",
+            cluster_id=f"tpl:{r['original_id']}",
+            meta={"worked_solution": r["answer"], "original_id": int(r["original_id"]),
+                  "instance": int(r["instance"])},
         ))
-    return items, ds
+    return out
+
+
+def list_math_rollout_problems(model: str, split: str) -> list[str]:
+    from huggingface_hub import HfApi
+
+    prefix = f"{model}/{MR_TEMP}/{split}/"
+    files = HfApi().list_repo_files(MR_REPO, repo_type="dataset")
+    return sorted({f[len(prefix):].split("/")[0]
+                   for f in files
+                   if f.startswith(prefix) and f[len(prefix):].startswith("problem_")})
+
+
+def load_math_rollouts(model: str = MR_MODELS[0], split: str = MR_SPLITS[0],
+                       limit: int | None = None) -> list[Problem]:
+    """Problems plus the pre-computed per-chunk Thought Anchors metrics."""
+    from huggingface_hub import hf_hub_download
+
+    ids = list_math_rollout_problems(model, split)
+    if limit:
+        ids = ids[:limit]
+    out = []
+    for pid in ids:
+        base = f"{model}/{MR_TEMP}/{split}/{pid}"
+        prob = json.load(open(hf_hub_download(MR_REPO, f"{base}/problem.json",
+                                              repo_type="dataset")))
+        try:
+            chunks = json.load(open(hf_hub_download(
+                MR_REPO, f"{base}/chunks_labeled.json", repo_type="dataset")))
+        except Exception:
+            chunks = []
+        out.append(Problem(
+            problem_id=f"mr:{model}:{split}:{pid}",
+            source="math_rollouts",
+            question=prob["problem"],
+            answer=_clean_number(str(prob.get("gt_answer", ""))),
+            cluster_id=f"mr:{pid}",
+            meta={"level": prob.get("level"), "type": prob.get("type"),
+                  "nickname": prob.get("nickname"), "model": model, "split": split,
+                  "cot_chunks": chunks},
+        ))
+    return out
+
+
+# --- reference CoT metrics, for the comparison table -------------------------
+COT_METRIC_KEYS = (
+    "resampling_importance_kl", "counterfactual_importance_kl",
+    "forced_importance_kl", "resampling_importance_accuracy",
+    "counterfactual_importance_accuracy", "forced_importance_accuracy",
+    "accuracy", "overdeterminedness", "different_trajectories_fraction",
+)
+
+
+def cot_reference_steps(p: Problem) -> list[dict]:
+    """Flatten a math_rollouts problem's pre-computed CoT chunk metrics into the
+    same shape our own code-arm measurements produce."""
+    rows = []
+    for c in p.meta.get("cot_chunks", []):
+        rows.append({
+            "problem_id": p.problem_id, "cluster_id": p.cluster_id,
+            "condition": "cot", "source": "math_rollouts_precomputed",
+            "step_idx": c.get("chunk_idx"), "text": c.get("chunk"),
+            "function_tags": c.get("function_tags"), "depends_on": c.get("depends_on"),
+            **{k: c.get(k) for k in COT_METRIC_KEYS},
+        })
+    return rows
