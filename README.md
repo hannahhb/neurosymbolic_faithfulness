@@ -24,11 +24,27 @@ Smoke-test the whole pipeline on a laptop with the scripted mock backend
 python run_phase0.py --backend mock --n-prompts 12 --out-dir runs/smoke_mock
 ```
 
-The real run (1× A100 is enough for a 7B; ~10–20 min):
+The real run. Two backends, same interface and same outputs:
 
 ```bash
-python run_phase0.py --model Qwen/Qwen2.5-7B-Instruct --out-dir runs/phase0_qwen7b
+# vLLM -- fast (~10-20 min on 1x A100), but needs a CUDA build matching the driver
+python run_phase0.py --backend vllm --model Qwen/Qwen2.5-7B-Instruct --out-dir runs/phase0_qwen7b
+
+# HuggingFace -- slower (~1-3 h), but only needs a torch build matching the driver
+python run_phase0.py --backend hf --model Qwen/Qwen2.5-7B-Instruct --hf-batch-size 32 --out-dir runs/phase0_qwen7b
 ```
+
+Use `hf` when vLLM cannot be installed against your driver's CUDA version.
+Phases 1/2 need HF anyway, since vLLM does not expose residual-stream hooks.
+
+One behavioural difference worth knowing: transformers' built-in `stop_strings=`
+*strips* the matched string from the output, whereas vLLM is configured here to
+keep it. Stripping would remove the closing `</tool_call>` tag and make the
+parser label every tool call MALFORMED, so `HFEngine` uses a custom stopping
+criterion and truncates to just after the stop string itself. The two backends
+are verified to agree on this. HF also cannot seed individual sequences within a
+batch, so its RNG is seeded per batch; greedy decoding is batch-size invariant,
+sampling is reproducible only at the same `--hf-batch-size`.
 
 Parser and sandbox tests:
 

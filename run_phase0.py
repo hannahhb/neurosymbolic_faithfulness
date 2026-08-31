@@ -51,7 +51,9 @@ def parse_args() -> Config:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default=d.model)
     p.add_argument("--tool-format", default=d.tool_format, choices=["hermes", "llama31"])
-    p.add_argument("--backend", default=d.backend, choices=["vllm", "mock"])
+    p.add_argument("--backend", default=d.backend, choices=["vllm", "hf", "mock"])
+    p.add_argument("--hf-batch-size", type=int, default=d.hf_batch_size)
+    p.add_argument("--hf-device-map", default=d.hf_device_map)
     p.add_argument("--tensor-parallel-size", type=int, default=d.tensor_parallel_size)
     p.add_argument("--max-model-len", type=int, default=d.max_model_len)
     p.add_argument("--gpu-memory-utilization", type=float, default=d.gpu_memory_utilization)
@@ -73,6 +75,7 @@ def parse_args() -> Config:
         model=a.model, tool_format=a.tool_format, backend=a.backend,
         tensor_parallel_size=a.tensor_parallel_size, max_model_len=a.max_model_len,
         gpu_memory_utilization=a.gpu_memory_utilization, dtype=a.dtype,
+        hf_batch_size=a.hf_batch_size, hf_device_map=a.hf_device_map,
         dataset=a.dataset, n_prompts=a.n_prompts, levels=a.levels,
         custom_levels=a.custom_levels,
         free_n_samples=a.free_n_samples, free_temperature=a.free_temperature,

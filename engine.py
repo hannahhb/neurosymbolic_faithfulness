@@ -220,9 +220,165 @@ class MockEngine(Engine):
         return out
 
 
+
+class _StopOnStrings:
+    """Halt a sequence once a stop string is fully generated.
+
+    transformers' built-in `stop_strings=` removes the match from the output;
+    we need it kept (vLLM's include_stop_str_in_output=True), so the truncation
+    is done by the caller instead.  Only a tail window of each sequence is
+    decoded per step, so the cost does not grow with sequence length.
+    """
+
+    def __init__(self, tokenizer, stops: list[str], prompt_len: int, margin: int = 8):
+        self.tokenizer = tokenizer
+        self.stops = stops
+        self.prompt_len = prompt_len
+        longest = max((len(tokenizer(s, add_special_tokens=False)["input_ids"])
+                       for s in stops), default=1)
+        self.window = longest + margin
+
+    def __call__(self, input_ids, scores, **kwargs):
+        import torch
+
+        gen = input_ids[:, self.prompt_len:]
+        tail = gen[:, -self.window:] if gen.shape[1] > self.window else gen
+        texts = self.tokenizer.batch_decode(tail, skip_special_tokens=False)
+        return torch.tensor(
+            [any(s in t for s in self.stops) for t in texts],
+            dtype=torch.bool, device=input_ids.device,
+        )
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace backend
+# ---------------------------------------------------------------------------
+class HFEngine(Engine):
+    """Plain transformers generation. Slower than vLLM but far fewer moving
+    parts -- it needs only a torch build matching the driver, no separately
+    compiled CUDA kernels.
+
+    One difference from VLLMEngine that matters for reproducibility: HF cannot
+    seed individual sequences within a batch, so the RNG is seeded once per
+    batch from the first sequence's seed.  Re-running with the same batch size
+    and the same input order reproduces the output; changing `batch_size` does
+    not.  The batch seed is therefore recorded on every GenOut.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        dtype: str = "bfloat16",
+        device_map: str | None = None,   # None -> "auto" on GPU, "cpu" otherwise
+        batch_size: int = 32,
+        seed: int = 0,
+        attn_implementation: str | None = None,
+    ):
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self.name = model
+        self.batch_size = batch_size
+        self.seed = seed
+        self.torch = torch
+        if device_map is None:
+            # "auto" needs accelerate and hangs on CPU-only hosts, which makes
+            # the pipeline impossible to smoke-test off-GPU
+            device_map = "auto" if torch.cuda.is_available() else "cpu"
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model)
+        # decoder-only batching requires left padding, else the generated
+        # continuation starts after the pads and the prompt is misaligned
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        kwargs: dict[str, Any] = {
+            "dtype": getattr(torch, dtype),
+            "device_map": device_map,
+        }
+        if attn_implementation:
+            kwargs["attn_implementation"] = attn_implementation
+        self.model = AutoModelForCausalLM.from_pretrained(model, **kwargs)
+        self.model.eval()
+
+    def generate(self, prompts, temperature, max_tokens, seeds, stop):
+        torch = self.torch
+        assert len(prompts) == len(seeds)
+        results: list[GenOut] = []
+
+        for start in range(0, len(prompts), self.batch_size):
+            chunk = list(prompts[start: start + self.batch_size])
+            chunk_seeds = list(seeds[start: start + self.batch_size])
+            batch_seed = int(chunk_seeds[0])
+            torch.manual_seed(batch_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(batch_seed)
+
+            enc = self.tokenizer(chunk, return_tensors="pt", padding=True)
+            enc = {k: v.to(self.model.device) for k, v in enc.items()}
+            prompt_len = enc["input_ids"].shape[1]
+
+            gen_kwargs: dict[str, Any] = {
+                "max_new_tokens": max_tokens,
+                "pad_token_id": self.tokenizer.pad_token_id,
+            }
+            if temperature and temperature > 0.0:
+                gen_kwargs.update(do_sample=True, temperature=temperature, top_p=0.95)
+            else:
+                gen_kwargs.update(do_sample=False)
+            if stop:
+                # NB: transformers' own `stop_strings=` STRIPS the matched
+                # string from the output, whereas vLLM is configured here with
+                # include_stop_str_in_output=True.  That difference is not
+                # cosmetic: it would remove the closing </tool_call> tag and
+                # make the parser label every tool call MALFORMED.  So we use a
+                # custom criterion that halts once the string is complete, and
+                # truncate to just after it ourselves.
+                from transformers import StoppingCriteriaList
+
+                gen_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                    [_StopOnStrings(self.tokenizer, list(stop), prompt_len)]
+                )
+
+            with torch.no_grad():
+                out = self.model.generate(**enc, **gen_kwargs)
+
+            new_tokens = out[:, prompt_len:]
+            for row in new_tokens:
+                ids = row.tolist()
+                text = self.tokenizer.decode(ids, skip_special_tokens=False)
+                # count real tokens, ignoring right-padding on finished rows
+                n_real = len(ids)
+                pad_id = self.tokenizer.pad_token_id
+                while n_real > 0 and ids[n_real - 1] == pad_id:
+                    n_real -= 1
+                hit_length = n_real >= max_tokens
+                # truncate to just after the earliest stop string, keeping it
+                hit_stop = False
+                if stop:
+                    ends = [text.index(t) + len(t) for t in stop if t in text]
+                    if ends:
+                        text = text[: min(ends)]
+                        hit_stop = True
+                text, saw_ender = strip_enders(text)
+                reason = "length" if (hit_length and not (hit_stop or saw_ender)) else "stop"
+                results.append(GenOut(text=text, finish_reason=reason,
+                                      n_tokens=n_real))
+        return results
+
+
 def make_engine(cfg) -> Engine:
     if cfg.backend == "mock":
         return MockEngine(seed=cfg.seed)
+    if cfg.backend == "hf":
+        return HFEngine(
+            model=cfg.model,
+            dtype=cfg.dtype,
+            batch_size=cfg.hf_batch_size,
+            device_map=cfg.hf_device_map,
+            seed=cfg.seed,
+        )
     return VLLMEngine(
         model=cfg.model,
         tensor_parallel_size=cfg.tensor_parallel_size,

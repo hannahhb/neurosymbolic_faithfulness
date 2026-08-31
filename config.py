@@ -16,11 +16,15 @@ class Config:
     # tool_format="llama31".
     model: str = "Qwen/Qwen2.5-7B-Instruct"
     tool_format: str = "hermes"          # "hermes" | "llama31"
-    backend: str = "vllm"                # "vllm" | "mock"
+    backend: str = "hf"                  # "hf" | "vllm" | "mock"
+    # hf is the default because it needs only a torch build matching the
+    # driver; vllm additionally needs its own CUDA-compiled kernels to match.
     tensor_parallel_size: int = 1
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.90
     dtype: str = "bfloat16"
+    hf_batch_size: int = 32               # only used by the "hf" backend
+    hf_device_map: str | None = None      # None -> "auto" on GPU, "cpu" otherwise
 
     # --- task --------------------------------------------------------------
     dataset: str = "chain_sum"           # "chain_sum" | "products"
