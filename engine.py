@@ -121,104 +121,52 @@ class MockTokenizer:
 
     def apply_chat_template(self, messages, tools=None, add_generation_prompt=True,
                             tokenize=False):
-        import json as _json
-
         parts = []
-        sys_msg = ""
-        rest = list(messages)
-        if rest and rest[0]["role"] == "system":
-            sys_msg = rest[0]["content"]
-            rest = rest[1:]
-        if tools:
-            sys_msg += (
-                "\n\n# Tools\nYou may call one or more functions to assist with "
-                "the user query.\n<tools>\n"
-                + "\n".join(_json.dumps(t) for t in tools)
-                + "\n</tools>"
-            )
-        parts.append(f"<|im_start|>system\n{sys_msg}<|im_end|>\n")
-        for m in rest:
-            if m["role"] == "tool":
-                parts.append(
-                    f"<|im_start|>user\n<tool_response>\n{m['content']}\n"
-                    f"</tool_response><|im_end|>\n"
-                )
-            else:
-                parts.append(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n")
+        for m in messages:
+            parts.append(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n")
         if add_generation_prompt:
             parts.append("<|im_start|>assistant\n")
         return "".join(parts)
 
 
-_EXPR = re.compile(r":\s*(.+?)\s*=?\s*$", re.M)
+_HINT = re.compile(r"thinks the answer is ([\d.]+)")
 
 
 class MockEngine(Engine):
-    """Deterministic pseudo-model.
+    """Scripted stand-in for offline testing of the 2x2.
 
-    Tool-call propensity rises with the number of digits in the question, so the
-    calibration curves have the shape a real run might have.  It also emits a
-    small rate of malformed calls so the malformed-rate gate is exercised.
+    It fakes a susceptible model: when a hint is present it answers with the
+    hinted number `bias_rate` of the time, otherwise it answers with a
+    deterministic pseudo-answer.  That makes the susceptibility metric itself
+    testable without a GPU -- the measured delta should come back near
+    `bias_rate`.  Outputs are stamped as mock in every run directory.
     """
 
     name = "mock"
 
-    def __init__(self, malformed_rate: float = 0.03, seed: int = 0):
+    def __init__(self, seed: int = 0, bias_rate: float = 0.4):
         self.tokenizer = MockTokenizer()
-        self.malformed_rate = malformed_rate
         self.seed = seed
-
-    @staticmethod
-    def _expression(prompt: str) -> str | None:
-        m = re.search(r"(?:problem|multiplication):\s*([-\d\s+*]+?)\s*=?\s*\.?\s*\n",
-                      prompt + "\n")
-        return m.group(1).strip() if m else None
+        self.bias_rate = bias_rate
 
     def generate(self, prompts, temperature, max_tokens, seeds, stop):
-        from neurosymbolic_faithfulness.calculator import run_calculator
-
         out: list[GenOut] = []
         for prompt, seed in zip(prompts, seeds):
             rng = random.Random(
                 int(hashlib.sha256(f"{seed}|{prompt}".encode()).hexdigest()[:12], 16)
             )
-            expr = self._expression(prompt)
-            digits = sum(c.isdigit() for c in (expr or ""))
-            has_tool = "<tools>" in prompt
-            already_called = "<tool_response>" in prompt
-
-            if already_called:
-                m = re.findall(r"<tool_response>\s*(.*?)\s*</tool_response>",
-                               prompt, re.DOTALL)
-                out.append(GenOut(f"The result is {m[-1]}.\n\n\\boxed{{{m[-1]}}}",
-                                  "stop", 20))
-                continue
-
-            p_tool = 0.0 if not has_tool else min(0.98, max(0.02, (digits - 4) / 30))
-            if has_tool and rng.random() < p_tool:
-                if rng.random() < self.malformed_rate:
-                    body = '{"name": "calculator", "arguments": {"expr": "%s"}}' % expr
-                    out.append(GenOut(
-                        f"This is large; I'll compute it.\n<tool_call>\n{body}\n"
-                        f"</tool_call>", "stop", 40))
-                else:
-                    body = '{"name": "calculator", "arguments": {"expression": "%s"}}' % expr
-                    out.append(GenOut(
-                        f"That is too many digits to add reliably in my head, so "
-                        f"I'll use the calculator.\n<tool_call>\n{body}\n"
-                        f"</tool_call>", "stop", 45))
-                continue
-
-            truth = run_calculator(expr or "0")
-            val = truth.value if truth.ok else "0"
-            # unaided accuracy decays with digit count
-            p_correct = max(0.02, 1.0 - digits / 45.0)
-            if rng.random() >= p_correct:
-                val = str(int(val) + rng.choice([1, -1, 10, -100, 1000]))
-            out.append(GenOut(f"Let me work through it step by step.\n\n"
-                              f"\\boxed{{{val}}}", "stop", 30))
+            sym = "<expr>" in prompt
+            hint = _HINT.search(prompt)
+            if hint and rng.random() < self.bias_rate:
+                value = hint.group(1)
+            else:
+                value = str(rng.randint(10, 9999))
+            if sym:
+                text = f"<expr>{value} + 0</expr>"
+            else:
+                text = f"Working through it step by step.\n\n\\boxed{{{value}}}"
+            out.append(GenOut(text=text, finish_reason="stop", n_tokens=16))
         return out
-
 
 
 class _StopOnStrings:
@@ -331,10 +279,10 @@ class HFEngine(Engine):
                 # NB: transformers' own `stop_strings=` STRIPS the matched
                 # string from the output, whereas vLLM is configured here with
                 # include_stop_str_in_output=True.  That difference is not
-                # cosmetic: it would remove the closing </tool_call> tag and
-                # make the parser label every tool call MALFORMED.  So we use a
-                # custom criterion that halts once the string is complete, and
-                # truncate to just after it ourselves.
+                # cosmetic: a stop string that marks the end of a structured
+                # block (a closing tag, say) must survive into the output or the
+                # parser sees a truncated block.  So we halt on a custom
+                # criterion and truncate to just after the match ourselves.
                 from transformers import StoppingCriteriaList
 
                 gen_kwargs["stopping_criteria"] = StoppingCriteriaList(
@@ -366,24 +314,3 @@ class HFEngine(Engine):
                 results.append(GenOut(text=text, finish_reason=reason,
                                       n_tokens=n_real))
         return results
-
-
-def make_engine(cfg) -> Engine:
-    if cfg.backend == "mock":
-        return MockEngine(seed=cfg.seed)
-    if cfg.backend == "hf":
-        return HFEngine(
-            model=cfg.model,
-            dtype=cfg.dtype,
-            batch_size=cfg.hf_batch_size,
-            device_map=cfg.hf_device_map,
-            seed=cfg.seed,
-        )
-    return VLLMEngine(
-        model=cfg.model,
-        tensor_parallel_size=cfg.tensor_parallel_size,
-        max_model_len=cfg.max_model_len,
-        gpu_memory_utilization=cfg.gpu_memory_utilization,
-        dtype=cfg.dtype,
-        seed=cfg.seed,
-    )

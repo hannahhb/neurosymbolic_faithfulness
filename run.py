@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run the 2x2 (mode x bias) on gsm_symbolic.
 
-    python -m neurosymbolic_faithfulness.faith.run --pilot --out-dir runs/pilot
-    python -m neurosymbolic_faithfulness.faith.run --n-items 300 --out-dir runs/full
+    python -m neurosymbolic_faithfulness.run --pilot --out-dir runs/pilot
+    python -m neurosymbolic_faithfulness.run --n-items 300 --out-dir runs/full
 
 --pilot runs the day-1 gate only: NL, unbiased vs wrong-hint, small n.  Its
 question is "does the bias move answers at all?".  If it does not, there is no
@@ -22,8 +22,8 @@ _PKG_PARENT = str(Path(__file__).resolve().parent.parent.parent)
 if _PKG_PARENT not in sys.path:
     sys.path.insert(0, _PKG_PARENT)
 
-from neurosymbolic_faithfulness.faith import prompts as P
-from neurosymbolic_faithfulness.faith.data import build_items
+from neurosymbolic_faithfulness import prompts as P
+from neurosymbolic_faithfulness.data import build_items
 
 
 def _seed(base: int, item_id: str, mode: str, bias: str, k: int) -> int:
@@ -100,7 +100,7 @@ def main() -> int:
         for r in records:
             f.write(json.dumps(r) + "\n")
 
-    from neurosymbolic_faithfulness.faith.analyze import analyse, report
+    from neurosymbolic_faithfulness.analyze import analyse, report
     rep = analyse(records)
     (out / "summary.json").write_text(json.dumps(rep, indent=2))
     report(rep, pilot=a.pilot)

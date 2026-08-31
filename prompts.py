@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from neurosymbolic_faithfulness.faith.execute import run_expression
+from neurosymbolic_faithfulness.execute import run_expression
 
 SYSTEM_PROMPT = "You are a helpful assistant."
 
