@@ -26,8 +26,22 @@ End your response with your final answer on its own line, in exactly this format
 Answer: <value>
 where <value> is {answer_spec}."""
 
+# The "Output only Python code" clause is load-bearing, not stylistic.  Measured
+# on the same 60 GSM8K items, Qwen2.5-0.5B, greedy:
+#
+#   "Output only Python code."              49/60 executed, 28.3% accuracy
+#   "Reason in code only."                  29/60 executed, 16.7% accuracy
+#   both, as below                          57/60 executed, 31.7% accuracy
+#
+# Under the middle wording only half the completions contained print() at all and
+# some were pure prose.  A PoT rollout containing no code is not the PoT
+# condition -- it is CoT with a different preamble -- so compliance here decides
+# whether the CoT/PoT contrast measures what it claims to.  Keep the explicit
+# output constraint AND the anti-prose line; the "reason in code" framing rides
+# alongside them rather than replacing them.
 POT_INSTRUCTION = """You are solving a math problem. Write a Python program that computes the answer.
-Reaon in  code only. Do not write any explanation outside the code.
+Output only Python code - reason in code, not in prose.
+Do not write any explanation outside the code.
 Do not write explanatory comments - the code should stand alone.
 The program must compute the answer from the problem's constraints and print it
 on the last line in exactly this format:
@@ -36,9 +50,18 @@ where <value> is {answer_spec}."""
 
 # Per-dataset description of what a well-formed answer looks like.  Kept out of
 # the instruction bodies so the two conditions share it exactly.
+# Kept deliberately free of medium-specific language.  An earlier MATH spec read
+# "the final expression in LaTeX", which broke the PoT arm outright: told that
+# its output must be LaTeX, Qwen2.5-7B emitted `Answer: |$\len(asymptotes)$|`
+# as a bare statement instead of a print() call, and the program died with a
+# SyntaxError.  On GSM8K, whose spec asks for a plain number, the same model
+# complied on 59/60 items.  Anything that reads as a formatting demand on the
+# *medium* rather than the *value* pushes PoT toward emitting markup instead of
+# code.  LaTeX golds still match: nsf.answers normalises \frac, \sqrt, \boxed
+# and math-mode delimiters if the model produces them anyway.
 ANSWER_SPEC = {
     "gsm8k": "a plain number with no units, commas, or currency symbols",
-    "math": "the final expression in LaTeX, with no surrounding text",
+    "math": "the final answer, with no surrounding text, units, or explanation",
 }
 
 CONDITIONS = ("cot", "pot")

@@ -39,6 +39,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--conditions", nargs="+", default=["cot", "pot"])
+    ap.add_argument("--component", default="resid_post",
+                    help="which harvested component to probe")
     ap.add_argument("--scheme", default="first_token",
                     choices=["first_token", "parity", "magnitude"])
     ap.add_argument("--positions", nargs="+", default=None,
@@ -57,7 +59,7 @@ def main() -> None:
     all_rows = []
 
     for condition in args.conditions:
-        acts_path = run / "acts" / f"acts_{condition}.npy"
+        acts_path = run / "acts" / f"acts_{condition}__{args.component}.npy"
         if not acts_path.exists():
             print(f"[{condition}] no activations at {acts_path}, skipping")
             continue
@@ -96,6 +98,7 @@ def main() -> None:
         for r in results:
             d = r.to_dict()
             d["condition"] = condition
+            d["component"] = args.component
             d["scheme"] = args.scheme
             all_rows.append(d)
 
@@ -112,7 +115,7 @@ def main() -> None:
     if not all_rows:
         raise SystemExit("no results; run 04_harvest_activations.py first")
 
-    out = run / "summary" / f"probe_{args.scheme}.csv"
+    out = run / "summary" / f"probe_{args.scheme}_{args.component}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(all_rows[0].keys()))

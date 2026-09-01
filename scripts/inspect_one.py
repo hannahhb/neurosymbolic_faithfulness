@@ -150,8 +150,16 @@ def main() -> None:
                 block(res.stderr.strip()[:800], indent="    | ")
             raw = res.answer
         else:
-            raw = answers.extract_answer(completion)
-            print(f"  parsed from the last `Answer:` line")
+            # Must match 03_execute.py exactly.  The inspector exists to show
+            # what the pipeline will do; if it parsed CoT more strictly than the
+            # pipeline does, it would report `None` for completions the pipeline
+            # recovers fine -- which is precisely the case that matters, since
+            # models routinely ignore the `Answer:` instruction.
+            raw, tier = answers.extract_answer_lenient(completion)
+            print(f"  extraction tier : {tier}")
+            if tier in ("phrase", "last_number"):
+                print(f"  (fallback tier -- the model did not emit an `Answer:` line; "
+                      f"this value came from a looser rule)")
 
         norm = answers.normalize(raw)
         ok = answers.is_correct(raw, item.gold)

@@ -4,6 +4,7 @@ transformers>=4.45
 datasets>=3.0
 numpy>=1.26
 scikit-learn>=1.4
+transformer-lens>=2.0   # activation harvesting (nsf/activations.py)
 pandas>=2.0
 matplotlib>=3.8
 

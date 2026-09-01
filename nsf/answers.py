@@ -88,6 +88,33 @@ def extract_answer_lenient(text: str) -> tuple[Optional[str], str]:
 
 # --- normalisation ----------------------------------------------------------
 
+# Math-mode delimiters a model may wrap its answer in.  Stripped repeatedly
+# because they nest: Qwen-7B answered `\(\text{2}\)` on a MATH item, which is
+# simply 2 -- but leaving `\(` in place scored it wrong AND gave the probe the
+# label '\\' instead of '2'.
+_WRAPPERS = [
+    re.compile(r"^\\boxed\{(.*)\}$", re.DOTALL),
+    re.compile(r"^\\fbox\{(.*)\}$", re.DOTALL),
+    re.compile(r"^\\\((.*)\\\)$", re.DOTALL),
+    re.compile(r"^\\\[(.*)\\\]$", re.DOTALL),
+    re.compile(r"^\$\$(.*)\$\$$", re.DOTALL),
+    re.compile(r"^\$(.*)\$$", re.DOTALL),
+]
+
+
+def _strip_wrappers(s: str, max_depth: int = 6) -> str:
+    s = s.strip()
+    for _ in range(max_depth):
+        before = s
+        for pat in _WRAPPERS:
+            m = pat.match(s)
+            if m:
+                s = m.group(1).strip()
+        if s == before:
+            return s
+    return s
+
+
 _LATEX_STRIP = [
     (r"\\left", ""),
     (r"\\right", ""),
@@ -115,9 +142,7 @@ def normalize(ans: Optional[str]) -> Optional[str]:
     if not s:
         return None
 
-    # Strip a surrounding \boxed{...} or $...$ wrapper.
-    s = re.sub(r"^\\boxed\{(.*)\}$", r"\1", s.strip())
-    s = s.strip("$").strip()
+    s = _strip_wrappers(s)
 
     s = _TEXT_WRAPPER.sub(r"\1", s)
     for pat, rep in _LATEX_STRIP:

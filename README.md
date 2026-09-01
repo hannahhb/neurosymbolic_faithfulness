@@ -57,8 +57,9 @@ baseline), never raw accuracy.**
 python scripts/01_build_dataset.py --dataset gsm8k --n 1000 --out runs/dev
 python scripts/02_generate.py       --run runs/dev --backend vllm --model Qwen/Qwen2.5-7B-Instruct
 python scripts/03_execute.py        --run runs/dev
-python scripts/04_harvest_activations.py --run runs/dev --device cuda
-python scripts/05_train_probes.py   --run runs/dev --scheme first_token
+python scripts/04_harvest_activations.py --run runs/dev --device cuda \
+    --components resid_post attn_out mlp_out
+python scripts/05_train_probes.py   --run runs/dev --scheme first_token --component resid_post
 ```
 
 To look at one problem end to end — exact prompt, raw completion, how the answer
@@ -79,6 +80,45 @@ it is how both of the extraction bugs above were found.
 Steps 2 and 4 need the GPU box. Steps 1, 3 and 5 run anywhere. Swap
 `--backend mock` (no model) or `--backend hf` (small model, MPS/CPU) to exercise
 the plumbing locally.
+
+## Activations: TransformerLens
+
+`04` replays each rollout through a `HookedTransformer` and stores one `.npy`
+per (condition, component). Components:
+
+| component | what it is |
+|---|---|
+| `resid_pre` / `resid_post` | the residual stream entering / leaving block L |
+| `attn_out` | what attention wrote into the stream at block L |
+| `mlp_out` | what the MLP wrote into the stream at block L |
+
+Having the writers separately is the point: `resid_post` answers *"is the answer
+present at layer L"*, while `attn_out` / `mlp_out` answer *"which component put
+it there"*. Probe one at a time with `--component`.
+
+Hooks slice to the readout positions **inside** the forward pass rather than
+caching everything — on a 7B with a 1300-token sequence that is ~10 MB per
+rollout instead of ~800 MB.
+
+Two verified facts worth not rediscovering:
+
+- `resid_post` at layer L is numerically identical to HF `hidden_states[L+1]`
+  for every layer **except the last**, where HF applies the final RMSNorm before
+  appending. Ours is the raw stream.
+- `resid_pre + attn_out + mlp_out == resid_post` to fp16 rounding. That identity
+  is the cheapest check that hook names and position indices line up.
+
+`from_pretrained` applies TransformerLens weight processing (`fold_ln`,
+`center_writing_weights`, `center_unembed`) by default. Centering makes the
+residual stream mean-zero along `d_model`, which removes the large common
+component in raw streams — distinct prompts correlate at ~0.93 without it — and
+that helps a linear probe. It is applied identically to both conditions. Pass
+`--no-fold-ln` if you need numbers comparable to raw HF instead.
+
+**Do not tokenise with `model.to_tokens`.** It defaults to `prepend_bos=True`,
+Qwen's chat template carries no BOS, and a prepended token shifts every readout
+index by one — silently probing the wrong positions. `Harvester.encode` passes
+explicit ids from the raw tokenizer to sidestep this.
 
 ## Things that will silently ruin the result
 
@@ -122,6 +162,14 @@ the plumbing locally.
   `last_number` is measuring the parser, not the model. PoT stdout is still
   parsed strictly — guessing at a number in stdout would invent an answer the
   program never produced.
+- **PoT prompt wording decides whether the arm is even PoT.** A rollout with no
+  code in it is CoT with a different preamble, and it will silently contaminate
+  the symbolic condition. Measured on 60 GSM8K items (Qwen2.5-0.5B, greedy):
+  `"Output only Python code."` -> 49/60 executed; `"Reason in code only."` ->
+  29/60, with only half the completions containing `print()` at all; both clauses
+  together -> 57/60. Check the `exec:` counter `03` prints before trusting any
+  PoT result, and treat a low `ok` rate as a prompt bug rather than a model
+  limitation.
 - **Chance is not 1/k.** Skewed classes and grouped folds make the theoretical
   baseline wrong. The permutation null (labels shuffled at group level, same fold
   structure) is the reference. Use ≥50 permutations before believing a z-score.
@@ -145,6 +193,6 @@ nsf/data.py         MATH + GSM8K -> one Item schema; brace-matched \boxed extrac
 nsf/answers.py      extraction, LaTeX/numeric normalisation, equivalence, class schemes
 nsf/execute.py      sandboxed execution; produces the PoT answer
 nsf/generate.py     vLLM / HF / mock backends
-nsf/activations.py  teacher-forced harvest; readout position arithmetic
+nsf/activations.py  TransformerLens harvest; hook points + readout position arithmetic
 nsf/probe.py        (position x layer) sweep, grouped CV, permutation null
 ```
