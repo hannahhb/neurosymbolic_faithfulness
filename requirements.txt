@@ -1,13 +1,12 @@
-# Install torch for a CUDA version your driver supports:
-#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
-# A driver reporting CUDA 12.8 runs any cu12x build at or below 12.8; it cannot
-# run a CUDA 13 build.  Check: nvidia-smi --query-gpu=driver_version --format=csv
-torch>=2.6,<2.12
-transformers>=4.51,<5          # 5.x removes APIs some serving stacks still call
-
-datasets>=3.0                  # apple/GSM-Symbolic
-huggingface-hub>=0.25          # uzaymacar/math-rollouts file tree
-sentence-transformers>=3.0     # all-MiniLM-L6-v2, the semantic-similarity filter
-scikit-learn>=1.4              # linear probes
+# Core analysis (laptop + GPU box)
+torch>=2.4
+transformers>=4.45
+datasets>=3.0
 numpy>=1.26
+scikit-learn>=1.4
+pandas>=2.0
 matplotlib>=3.8
+
+# Generation on the GPU box only. vLLM has no macOS/MPS build; the HF backend
+# in nsf.generate covers local smoke tests.
+# vllm>=0.6.0

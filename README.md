@@ -1,110 +1,150 @@
-# Is code generation more faithful than chain-of-thought?
+# Neurosymbolic faithfulness
 
-Two conditions, held identical except for the instruction:
+Does symbolic (program-of-thought) reasoning actually move computation out of
+the model's weights, or does it just relabel it?
 
-* **cot**  — `"Let's think step by step"` (after the problem)
-* **code** — `"write a python program for the following problem"` (before it)
+## The question
 
-Two measurements applied to both, which must agree:
+Standard framing: "is PoT more faithful than CoT?" That is hard to operationalise,
+because faithfulness is several different claims wearing one word.
 
-* **Counterfactual importance** (causal, black-box) — resample each step of the
-  trace and measure how much the final-answer distribution moves. Method from
-  *Thought Anchors* (Bogdan, Macar, Nanda & Conmy, arXiv:2506.19143).
-* **Linear probes** (correlational) — decode the eventual answer from the
-  residual stream at each step boundary. If it is decodable early, the visible
-  trace is post-hoc.
+Sharper framing, and the one this repo tests. **In PoT the model does not execute
+the code — the interpreter does.** The answer is produced outside the forward
+pass. So a linear probe on the model's own activations gives a clean read:
 
-## Data
+- If the eventual answer **cannot** be decoded from PoT activations before the
+  program is finished, the model genuinely offloaded the computation. There is no
+  internal answer for the code to be a post-hoc rationalisation *of*.
+- If it **can** be decoded early and accurately, the model already knew the answer
+  and emitted code as decoration. That is the interesting failure mode.
 
-| source | role |
-|---|---|
-| `apple/GSM-Symbolic` | 100 templates x 50 instances. Both arms generated here; `original_id` is the clustering unit. |
-| `uzaymacar/math-rollouts` | Thought Anchors companion data. **Its `chunks_labeled.json` already contains `resampling_importance_kl`, `counterfactual_importance_kl`, `forced_importance_kl`, 8-category `function_tags`, `depends_on`, `overdeterminedness`** for R1-Distill-Qwen-14B and Llama-8B on MATH. |
+CoT is the comparison arm: same problems, same model, natural-language reasoning
+that the model must carry out itself.
 
-The CoT arm on math-rollouts problems is therefore free — *provided you use the
-same model*. `run.py` uses the precomputed metrics by default; pass
-`--regenerate-cot` to ignore them.
+## The headline metric is `prompt_end`, not the trajectory
 
-## Running
+The probe reads the residual stream at the **last prompt token**, before a single
+reasoning token exists. Decodability there is evidence the answer was fixed in
+advance.
 
-```bash
-pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
-python test_faithfulness.py                      # 21 tests, no GPU
-python -m neurosymbolic_faithfulness.run resample --backend mock --embedder hash --n-problems 3
-```
+Decodability *during* generation is not evidence of anything on its own. Eighty
+percent of the way through a CoT the intermediate results are literally in the
+context window — a probe recovering the answer there is the reasoning working as
+designed. The generation deciles are reported as context for the `prompt_end`
+number, not as the result.
 
-Real runs:
+## Probe target
 
-```bash
-python -m neurosymbolic_faithfulness.run resample --model <hf-id> --dataset gsm_symbolic --n-problems 10 --n-rollouts 100
-python -m neurosymbolic_faithfulness.run probe    --model <hf-id> --dataset gsm_symbolic --n-problems 20
-```
+Answers are free-form (GSM8K integers, MATH LaTeX), so a k-way probe needs a
+projection onto a small label set. Measured class balance on the gold answers:
 
-## Files
+| scheme | GSM8K | MATH |
+|---|---|---|
+| `first_token` | 10 classes, 29% majority | 41 classes, 26% majority |
+| `parity` | 70/30 — unusable | 34% of answers undefined |
+| `magnitude` | 48% majority | 29% undefined |
 
-| file | role |
-|---|---|
-| `prompts.py` | the two prompts; `prefix=` re-enters a trace mid-way |
-| `segment.py` | sentences (cot) / statements (code), byte-exact offsets |
-| `data.py` | both datasets; `cot_reference_steps` flattens precomputed metrics |
-| `resample.py` | counterfactual importance, KL, MiniLM similarity filter |
-| `probe.py` | hidden-state capture, grouped-CV logistic probes |
-| `execute.py` | sandboxed execution of generated programs |
-| `engine.py` | HF / vLLM / mock backends |
-| `run.py` | `resample` and `probe` entry points |
+`first_token` is the default. Its GSM8K skew is Benford's law on leading digits;
+29% is the baseline a probe has to clear. `parity` is not viable on either set.
 
-## Method notes
+Because CoT and PoT produce *different* answers, their label distributions and
+majority baselines differ. **Compare `delta_majority` (accuracy − majority
+baseline), never raw accuracy.**
 
-* Replacement acceptance follows the paper: all-MiniLM-L6-v2, cosine **< 0.8**
-  counts as semantically different. `counterfactual_importance_kl` uses only
-  those; `resampling_importance_kl` pools all resamples.
-* KL uses additive smoothing so disjoint supports stay finite.
-* `n_unreadable` / `unreadable_fraction` are recorded per step. Answer
-  distributions are computed over parseable rollouts only, so a step with a high
-  unreadable fraction is reporting on a biased subset — check it before trusting
-  that row.
-* Probe CV is grouped by problem. Rollouts of one problem share a prompt and
-  would leak across a random split. A majority-class baseline accompanies every
-  AUC, since a problem whose rollouts agree gives a trivially high one.
-
-## Model
-
-`Qwen/Qwen2.5-7B-Instruct` (the default). It is not a reasoning model, so the
-prompt genuinely controls the output format and the cot/code contrast is clean.
-An R1-Distill would emit a natural-language `<think>` block in *both* arms,
-making them near-identical.
-
-The cost is that math-rollouts' precomputed CoT metrics come from
-R1-Distill-Qwen-14B / Llama-8B and **cannot** be paired with a Qwen2.5-7B code
-arm -- that would compare two models, not two conditions. `run.py` refuses the
-mismatch and regenerates the CoT arm instead, printing a `[guard]` line. So both
-arms are generated here, and math-rollouts serves as a MATH problem source and as
-a reference implementation to sanity-check our numbers against.
-
-Answer extraction deserves attention on the cot side: `"Let's think step by
-step"` carries no answer-format instruction, so extraction falls back through
-boxed -> "answer is N" -> trailing `= N` -> last number. The rule that fired is
-recorded per step in `answer_rules`. **A run dominated by `last_number` is not
-trustworthy** -- the last number in a trace is often an intermediate, which
-would corrupt every KL. Check that column before reading any result.
-
-## Compute
-
-100 rollouts x ~15 steps x 2 arms x 10 problems is ~30k generations of ~512
-tokens. `--n-rollouts 30` cuts it substantially at some cost in KL precision;
-start there and check whether the importance ranking is stable before paying for
-100.
-
-## Suggested first run
+## Pipeline
 
 ```bash
-python -m neurosymbolic_faithfulness.run resample \
-  --model Qwen/Qwen2.5-7B-Instruct --dataset gsm_symbolic \
-  --n-problems 5 --n-rollouts 30 --max-steps 8 --out-dir runs/pilot
+python scripts/01_build_dataset.py --dataset gsm8k --n 1000 --out runs/dev
+python scripts/02_generate.py       --run runs/dev --backend vllm --model Qwen/Qwen2.5-7B-Instruct
+python scripts/03_execute.py        --run runs/dev
+python scripts/04_harvest_activations.py --run runs/dev --device cuda
+python scripts/05_train_probes.py   --run runs/dev --scheme first_token
 ```
 
-Before scaling up, check three things in `steps.jsonl`: `answer_rules` is mostly
-`boxed`/`answer_is`/`executed` rather than `last_number`; `unreadable_fraction`
-is low; and `different_trajectories_fraction` is neither ~0 (the similarity
-filter is rejecting everything, so counterfactual KL is undefined) nor ~1 (it is
-accepting everything, so the filter is doing no work).
+To look at one problem end to end — exact prompt, raw completion, how the answer
+was recovered, and the token indices the harvester would probe:
+
+```bash
+# display what a run already produced (no model needed)
+python scripts/inspect_one.py --run runs/dev --index 0
+
+# or generate fresh for a single item
+python scripts/inspect_one.py --dataset gsm8k --index 0 --generate \
+    --backend hf --model Qwen/Qwen2.5-0.5B-Instruct
+```
+
+This is the fastest way to catch a misalignment before spending GPU hours, and
+it is how both of the extraction bugs above were found.
+
+Steps 2 and 4 need the GPU box. Steps 1, 3 and 5 run anywhere. Swap
+`--backend mock` (no model) or `--backend hf` (small model, MPS/CPU) to exercise
+the plumbing locally.
+
+## Things that will silently ruin the result
+
+- **Prompt drift.** vLLM generates; HF harvests activations. If the prompt string
+  differs by one character between the two, every readout index shifts and the
+  probe reads the wrong tokens. The exact rendered string is stored on each
+  rollout and replayed verbatim; `04` re-renders one prompt and hard-fails on
+  mismatch. Chat templating lives in `nsf/prompts.py` and nowhere else — in
+  particular vLLM's own `.chat()` helper is deliberately unused.
+- **Qwen's implicit system prompt.** Its chat template injects
+  "You are Qwen, created by Alibaba Cloud..." even when you pass only a user
+  message. Identical across both conditions, so it does not confound the
+  contrast, but it does shift every token index.
+- **Accuracy confound.** The two conditions will not have equal accuracy, and both
+  probe decodability and every faithfulness metric correlate with correctness, so
+  report probe results conditioned on correct/incorrect rather than pooled. Do not
+  assume the direction: on a 0.5B smoke run CoT beat PoT on GSM8K (46.7% vs 28.3%).
+  Measure it on your model.
+- **Leakage across samples.** With `n_samples > 1`, folds must split on
+  `item_id`. `nsf/probe.py` uses `StratifiedGroupKFold` for this.
+- **Asymmetric label attrition.** A CoT rollout is labelled if its `Answer:` line
+  parses; a PoT rollout is labelled only if its program also *ran*. Failed
+  executions drop out of the PoT probe entirely, so the two conditions are
+  trained on differently-selected subsets. `05` prints `labelled=` per condition
+  — if PoT attrition is large, report it, and consider restricting both arms to
+  items where each condition produced an answer.
+- **The two prompts differ.** `prompt_end` is the last token of a *different*
+  prompt in each condition, because the instructions differ. That is inherent to
+  the design — the question is "how much does the model already know at the start
+  of a CoT run vs a PoT run" — but it means the contrast is between two settings,
+  not between two readouts of one setting.
+- **CoT ignores the output format.** The 0.5B smoke run emitted a literal
+  `Answer:` line on 6/60 GSM8K items, writing "Therefore, the answer is: $4500"
+  instead; PoT complied 59/60, because there the format lives inside a `print()`
+  call the model copies rather than prose it must obey. Parsing strictly does not
+  fix this — it silently narrows the CoT arm to format-compliant completions, a
+  biased subset. `nsf/answers.extract_answer_lenient` falls back through
+  `answer_line -> boxed -> phrase -> last_number` and records which tier fired.
+  Restoring the dropped 90% moved measured CoT accuracy from 1.7% to 46.7%.
+  **Always read the tier distribution `03` prints**: a CoT arm resting mostly on
+  `last_number` is measuring the parser, not the model. PoT stdout is still
+  parsed strictly — guessing at a number in stdout would invent an answer the
+  program never produced.
+- **Chance is not 1/k.** Skewed classes and grouped folds make the theoretical
+  baseline wrong. The permutation null (labels shuffled at group level, same fold
+  structure) is the reference. Use ≥50 permutations before believing a z-score.
+
+## Executing model-generated code
+
+`nsf/execute.py` runs each PoT program in a fresh subprocess, in a scratch cwd,
+under a wall-clock timeout and best-effort CPU/memory/file-size rlimits. That
+contains runaway loops and memory bombs, which is what models actually produce.
+It is **not** a security sandbox — the code can still reach the network and the
+filesystem. Run it on a machine you are willing to have execute arbitrary Python.
+
+macOS refuses `RLIMIT_AS`, so limits are applied best-effort and the local
+fallback is wall-clock only; all three limits apply on the Linux GPU box.
+
+## Layout
+
+```
+nsf/prompts.py      CoT/PoT templates + the only chat-template call site
+nsf/data.py         MATH + GSM8K -> one Item schema; brace-matched \boxed extraction
+nsf/answers.py      extraction, LaTeX/numeric normalisation, equivalence, class schemes
+nsf/execute.py      sandboxed execution; produces the PoT answer
+nsf/generate.py     vLLM / HF / mock backends
+nsf/activations.py  teacher-forced harvest; readout position arithmetic
+nsf/probe.py        (position x layer) sweep, grouped CV, permutation null
+```

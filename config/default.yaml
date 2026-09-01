@@ -1,0 +1,36 @@
+# Reference configuration. The scripts take CLI flags; this file records the
+# settings a full run should use, so a run is reproducible from one place.
+
+model: Qwen/Qwen2.5-7B-Instruct
+
+dataset:
+  name: gsm8k          # gsm8k | math
+  split: test
+  n: 1000              # 0 = whole split
+  seed: 0
+
+generation:
+  backend: vllm
+  temperature: 0.0     # greedy: one deterministic answer per item
+  top_p: 1.0
+  max_tokens: 1024
+  n_samples: 1
+
+execution:
+  timeout: 10.0
+  workers: 8
+
+harvest:
+  device: cuda
+  dtype: float16
+  max_len: 4096
+  n_deciles: 10
+  layer_stride: 1      # 2 halves storage at the cost of layer resolution
+
+probe:
+  scheme: first_token  # parity is unusable: 70/30 on GSM8K, 34% undefined on MATH
+  C: 0.01
+  max_dim: 0           # 0 = raw activations; set e.g. 256 for a faster sweep
+  n_splits: 5
+  n_permutations: 50   # 20 is enough to debug; 50+ before believing a z-score
+  min_class_count: 10

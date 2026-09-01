@@ -1,4 +1,14 @@
 __pycache__/
-*.py[cod]
-runs/
+*.pyc
 .DS_Store
+.venv/
+venv/
+
+# Activation tensors are large and fully reproducible from rollouts.
+runs/**/acts/
+*.npy
+
+# Scratch runs
+runs/_*/
+runs/smoke/
+runs/e2e/
